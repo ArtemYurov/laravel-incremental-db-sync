@@ -7,9 +7,9 @@ namespace ArtemYurov\DbSync\Console;
 use Illuminate\Support\Facades\DB;
 
 /**
- * Full table structure refresh from remote server (DROP + CREATE + SYNC)
+ * Full database clone from remote server (DROP + CREATE + SYNC)
  */
-class RefreshCommand extends BaseDbSyncCommand
+class CloneCommand extends BaseDbSyncCommand
 {
     protected $signature = 'db-sync:clone
                             {--sync-connection= : Connection name from config/db-sync.php}
@@ -48,23 +48,32 @@ class RefreshCommand extends BaseDbSyncCommand
             // Build dependency graph
             $this->dependencyGraph->build($this->sourceConnection());
 
-            // Get table list
+            // Get all tables from remote (for structure recreation)
             $this->info('Fetching table list...');
-            $tableNames = $this->withTunnelRetry(fn () => $this->adapter->getTablesList($this->sourceConnection()));
+            $allTableNames = $this->withTunnelRetry(fn () => $this->adapter->getTablesList($this->sourceConnection()));
 
-            // Filter excluded tables
-            if (!$this->option('include-excluded')) {
-                $tableNames = array_filter($tableNames, fn ($table) => !in_array($table, $this->syncConfig->excludedTables));
-            }
-
-            // If specific tables are specified
+            // If specific tables are specified, limit to those
             if ($this->option('tables')) {
                 $requestedTables = array_map('trim', explode(',', $this->option('tables')));
-                $tableNames = array_intersect($tableNames, $requestedTables);
+                $allTableNames = array_values(array_intersect($allTableNames, $requestedTables));
             }
 
-            $tableNames = array_values($tableNames);
-            $this->info('   Tables found: ' . count($tableNames));
+            $this->info('   Tables found: ' . count($allTableNames));
+
+            // Separate tables for data sync (exclude excluded tables)
+            $excludedTables = $this->syncConfig->excludedTables;
+            if ($this->option('include-excluded')) {
+                $syncTableNames = $allTableNames;
+            } else {
+                $syncTableNames = array_values(array_filter(
+                    $allTableNames,
+                    fn ($table) => !in_array($table, $excludedTables)
+                ));
+                $excludedCount = count($allTableNames) - count($syncTableNames);
+                if ($excludedCount > 0) {
+                    $this->info("   Excluded from data sync: {$excludedCount} tables (structure will be created)");
+                }
+            }
             $this->newLine();
 
             // Get view list
@@ -90,9 +99,21 @@ class RefreshCommand extends BaseDbSyncCommand
             }
 
             // Show plan
-            $this->info('Tables to refresh:');
-            foreach ($tableNames as $table) {
+            $this->info('Tables to refresh (structure + data):');
+            foreach ($syncTableNames as $table) {
                 $this->info("   • {$table}");
+            }
+
+            $excludedInScope = array_values(array_filter(
+                $allTableNames,
+                fn ($table) => in_array($table, $excludedTables)
+            ));
+            if (!empty($excludedInScope) && !$this->option('include-excluded')) {
+                $this->newLine();
+                $this->info('Tables to refresh (structure only, no data):');
+                foreach ($excludedInScope as $table) {
+                    $this->info("   • {$table}");
+                }
             }
             $this->newLine();
 
@@ -126,14 +147,14 @@ class RefreshCommand extends BaseDbSyncCommand
                 $this->newLine();
             }
 
-            // DROP + CREATE
+            // DROP + CREATE all tables (including excluded — structure only)
             $this->info('Refreshing table structure (DROP + CREATE)...');
             $sourceConfig = $this->getSourceConnectionConfig();
             $schemaResult = $this->schemaManager->refreshTablesStructure(
                 $this->sourceConnection(),
                 $this->targetConnection(),
                 $sourceConfig,
-                $tableNames,
+                $allTableNames,
                 $viewNames,
             );
 
@@ -151,7 +172,7 @@ class RefreshCommand extends BaseDbSyncCommand
                 $this->info('Synchronizing data...');
                 $this->newLine();
 
-                $syncOrder = $this->dependencyGraph->sortByDependencies($tableNames, 'parents_first');
+                $syncOrder = $this->dependencyGraph->sortByDependencies($syncTableNames, 'parents_first');
 
                 $totalInserted = 0;
                 $totalUpdated = 0;

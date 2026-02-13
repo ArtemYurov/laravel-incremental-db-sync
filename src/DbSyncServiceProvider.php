@@ -4,9 +4,9 @@ declare(strict_types=1);
 
 namespace ArtemYurov\DbSync;
 
-use ArtemYurov\DbSync\Console\RefreshCommand;
+use ArtemYurov\DbSync\Console\CloneCommand;
 use ArtemYurov\DbSync\Console\RestoreCommand;
-use ArtemYurov\DbSync\Console\SyncCommand;
+use ArtemYurov\DbSync\Console\PullCommand;
 use Illuminate\Support\ServiceProvider;
 
 class DbSyncServiceProvider extends ServiceProvider
@@ -27,8 +27,8 @@ class DbSyncServiceProvider extends ServiceProvider
             ], 'db-sync-config');
 
             $this->commands([
-                RefreshCommand::class,
-                SyncCommand::class,
+                CloneCommand::class,
+                PullCommand::class,
                 RestoreCommand::class,
             ]);
         }

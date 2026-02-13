@@ -10,7 +10,7 @@ use Illuminate\Support\Facades\DB;
 /**
  * Incremental database synchronization from remote server
  */
-class SyncCommand extends BaseDbSyncCommand
+class PullCommand extends BaseDbSyncCommand
 {
     protected $signature = 'db-sync:pull
                             {--sync-connection= : Connection name from config/db-sync.php}

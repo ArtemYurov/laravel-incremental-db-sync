@@ -93,6 +93,7 @@ Options:
 |--------|-------------|
 | `--sync-connection=` | Connection name from config (default: `production`) |
 | `--tables=` | Sync only specified tables (comma-separated) |
+| `--exclude=` | Exclude specified tables (comma-separated) |
 | `--views=` | Sync only specified views (comma-separated) |
 | `--include-excluded` | Include normally excluded tables |
 | `--analyze-only` | Only show analysis, don't sync |
@@ -117,6 +118,7 @@ Options:
 |--------|-------------|
 | `--sync-connection=` | Connection name from config |
 | `--tables=` | Refresh only specified tables (comma-separated) |
+| `--exclude=` | Exclude specified tables (comma-separated) |
 | `--views=` | Refresh only specified views (comma-separated) |
 | `--include-excluded` | Include normally excluded tables |
 | `--dry-run` | Show plan without executing |
