@@ -373,7 +373,7 @@ class PgsqlAdapter implements DatabaseAdapterInterface
         string $primaryKey,
         array $columns,
     ): array {
-        $stats = ['inserted' => 0, 'updated' => 0, 'errors' => 0];
+        $stats = ['inserted' => 0, 'updated' => 0, 'errors' => 0, 'error_messages' => []];
 
         $updateSet = [];
         foreach ($columns as $column) {
@@ -395,6 +395,7 @@ class PgsqlAdapter implements DatabaseAdapterInterface
             }
         } catch (\Exception $e) {
             $stats['errors']++;
+            $stats['error_messages'][] = ['id' => $record[$primaryKey] ?? null, 'message' => $e->getMessage()];
         }
 
         return $stats;

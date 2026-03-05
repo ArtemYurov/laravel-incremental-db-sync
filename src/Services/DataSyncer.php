@@ -32,7 +32,7 @@ class DataSyncer
         int $batchSize,
         callable $retryCallback,
     ): array {
-        $stats = ['inserted' => 0, 'errors' => 0];
+        $stats = ['inserted' => 0, 'errors' => 0, 'error_messages' => []];
 
         if ($remoteCount == 0) {
             return $stats;
@@ -53,6 +53,7 @@ class DataSyncer
                 $stats['inserted'] += $records->count();
             } catch (\Exception $e) {
                 $stats['errors'] += $records->count();
+                $stats['error_messages'][] = ['id' => null, 'message' => $e->getMessage()];
             }
 
             $offset += $batchSize;
@@ -114,7 +115,7 @@ class DataSyncer
         int $batchSize,
         ?ProgressBar $progressBar = null,
     ): array {
-        $stats = ['deleted' => 0, 'errors' => 0];
+        $stats = ['deleted' => 0, 'errors' => 0, 'error_messages' => []];
 
         if (empty($idsToDelete)) {
             return $stats;
@@ -139,6 +140,7 @@ class DataSyncer
                 $stats['deleted'] += $deleted;
             } catch (\Exception $e) {
                 $stats['errors'] += count($chunk);
+                $stats['error_messages'][] = ['id' => null, 'message' => $e->getMessage()];
             }
             $progressBar?->advance(count($chunk));
         }
@@ -159,7 +161,7 @@ class DataSyncer
         callable $retryCallback,
         ?ProgressBar $progressBar = null,
     ): array {
-        $stats = ['inserted' => 0, 'updated' => 0, 'errors' => 0];
+        $stats = ['inserted' => 0, 'updated' => 0, 'errors' => 0, 'error_messages' => []];
 
         $primaryKey = $this->adapter->getPrimaryKeyColumn($source, $table);
         if (!$primaryKey) {
@@ -188,6 +190,7 @@ class DataSyncer
             $stats['inserted'] += $result['inserted'];
             $stats['updated'] += $result['updated'];
             $stats['errors'] += $result['errors'];
+            $stats['error_messages'] = array_merge($stats['error_messages'], $result['error_messages']);
             $offset += $batchSize;
         }
 
@@ -210,7 +213,7 @@ class DataSyncer
         callable $retryCallback,
         ?ProgressBar $progressBar = null,
     ): array {
-        $stats = ['inserted' => 0, 'updated' => 0, 'errors' => 0];
+        $stats = ['inserted' => 0, 'updated' => 0, 'errors' => 0, 'error_messages' => []];
 
         $allRecords = $retryCallback(fn () => $this->adapter->getSelfReferencingRecords($source, $table, $primaryKey, $selfRefColumn));
 
@@ -230,6 +233,7 @@ class DataSyncer
             $stats['inserted'] += $result['inserted'];
             $stats['updated'] += $result['updated'];
             $stats['errors'] += $result['errors'];
+            $stats['error_messages'] = array_merge($stats['error_messages'], $result['error_messages']);
         }
 
         return $stats;
@@ -247,7 +251,7 @@ class DataSyncer
         ?string $primaryKey = null,
         ?ProgressBar $progressBar = null,
     ): array {
-        $stats = ['inserted' => 0, 'updated' => 0, 'errors' => 0];
+        $stats = ['inserted' => 0, 'updated' => 0, 'errors' => 0, 'error_messages' => []];
 
         if (empty($records)) {
             return $stats;
@@ -266,6 +270,7 @@ class DataSyncer
                 $progressBar?->advance(count($records));
             } catch (\Exception $e) {
                 $stats['errors'] = count($records);
+                $stats['error_messages'][] = ['id' => null, 'message' => $e->getMessage()];
             }
             return $stats;
         }
@@ -282,6 +287,7 @@ class DataSyncer
             $stats['inserted'] += $result['inserted'];
             $stats['updated'] += $result['updated'];
             $stats['errors'] += $result['errors'];
+            $stats['error_messages'] = array_merge($stats['error_messages'], $result['error_messages']);
 
             $progressBar?->advance();
         }

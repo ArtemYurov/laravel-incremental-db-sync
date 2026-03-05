@@ -6,6 +6,7 @@ namespace ArtemYurov\DbSync\Console;
 
 use ArtemYurov\DbSync\DTO\TableDiff;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Incremental database synchronization from remote server
@@ -16,6 +17,7 @@ class PullCommand extends BaseDbSyncCommand
                             {--sync-connection= : Connection name from config/db-sync.php}
                             {--force : Run without confirmation}
                             {--tables= : Synchronize only specified tables (comma-separated)}
+                            {--exclude= : Exclude specified tables (comma-separated)}
                             {--views= : Synchronize only specified views (comma-separated)}
                             {--include-excluded : Include excluded tables}
                             {--analyze-only : Only analyze changes}
@@ -29,6 +31,9 @@ class PullCommand extends BaseDbSyncCommand
 
     /** Sync results: ['table' => ['inserted'=>0, 'updated'=>0, 'deleted'=>0, 'errors'=>0]] */
     protected array $syncResults = [];
+
+    /** Error messages per table: ['table' => [['id' => ..., 'message' => ...], ...]] */
+    protected array $syncErrorMessages = [];
 
     public function handle(): int
     {
@@ -46,6 +51,7 @@ class PullCommand extends BaseDbSyncCommand
         $this->setupSignalHandlers();
         $this->resetState();
         $this->syncResults = [];
+        $this->syncErrorMessages = [];
 
         try {
             $this->connectToRemote();
@@ -225,6 +231,10 @@ class PullCommand extends BaseDbSyncCommand
         if ($this->option('tables')) {
             $requestedTables = array_map('trim', explode(',', $this->option('tables')));
             $tableNames = array_intersect($tableNames, $requestedTables);
+        }
+        if ($this->option('exclude')) {
+            $excludeTables = array_map('trim', explode(',', $this->option('exclude')));
+            $tableNames = array_filter($tableNames, fn ($table) => !in_array($table, $excludeTables));
         }
         $tableNames = array_values($tableNames);
 
@@ -482,6 +492,9 @@ class PullCommand extends BaseDbSyncCommand
 
             $this->syncResults[$table]['deleted'] = $deleteStats['deleted'];
             $this->syncResults[$table]['errors'] += $deleteStats['errors'];
+            if (!empty($deleteStats['error_messages'])) {
+                $this->syncErrorMessages[$table] = array_merge($this->syncErrorMessages[$table] ?? [], $deleteStats['error_messages']);
+            }
         }
 
         $this->newLine();
@@ -539,6 +552,9 @@ class PullCommand extends BaseDbSyncCommand
             $this->syncResults[$table]['inserted'] = ($this->syncResults[$table]['inserted'] ?? 0) + $upsertStats['inserted'];
             $this->syncResults[$table]['updated'] = ($this->syncResults[$table]['updated'] ?? 0) + $upsertStats['updated'];
             $this->syncResults[$table]['errors'] = ($this->syncResults[$table]['errors'] ?? 0) + $upsertStats['errors'];
+            if (!empty($upsertStats['error_messages'])) {
+                $this->syncErrorMessages[$table] = array_merge($this->syncErrorMessages[$table] ?? [], $upsertStats['error_messages']);
+            }
         }
 
         $this->newLine();
@@ -779,6 +795,24 @@ class PullCommand extends BaseDbSyncCommand
         $this->info('   Records deleted: ' . number_format($totalDeleted, 0, ',', ' '));
         if ($totalErrors > 0) {
             $this->warn('   Errors: ' . number_format($totalErrors, 0, ',', ' '));
+        }
+
+        if (!empty($this->syncErrorMessages)) {
+            $this->newLine();
+            $this->warn('Error details:');
+            foreach ($this->syncErrorMessages as $table => $errors) {
+                $this->warn("  {$table}:");
+                $shown = array_slice($errors, 0, 3);
+                foreach ($shown as $err) {
+                    $idPart = $err['id'] !== null ? "[id={$err['id']}] " : '';
+                    $this->warn("    - {$idPart}{$err['message']}");
+                }
+                $remaining = count($errors) - 3;
+                if ($remaining > 0) {
+                    $this->warn("    ... and {$remaining} more");
+                }
+            }
+            Log::warning('db-sync:pull errors', $this->syncErrorMessages);
         }
     }
 }

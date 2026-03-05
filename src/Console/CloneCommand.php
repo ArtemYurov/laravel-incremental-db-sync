@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace ArtemYurov\DbSync\Console;
 
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Full database clone from remote server (DROP + CREATE + SYNC)
@@ -15,6 +16,7 @@ class CloneCommand extends BaseDbSyncCommand
                             {--sync-connection= : Connection name from config/db-sync.php}
                             {--force : Run without confirmation}
                             {--tables= : Refresh only specified tables (comma-separated)}
+                            {--exclude= : Exclude specified tables (comma-separated)}
                             {--views= : Refresh only specified views (comma-separated)}
                             {--include-excluded : Include excluded tables}
                             {--dry-run : Show what will be refreshed without executing}
@@ -56,6 +58,10 @@ class CloneCommand extends BaseDbSyncCommand
             if ($this->option('tables')) {
                 $requestedTables = array_map('trim', explode(',', $this->option('tables')));
                 $allTableNames = array_values(array_intersect($allTableNames, $requestedTables));
+            }
+            if ($this->option('exclude')) {
+                $excludeTables = array_map('trim', explode(',', $this->option('exclude')));
+                $allTableNames = array_values(array_filter($allTableNames, fn ($table) => !in_array($table, $excludeTables)));
             }
 
             $this->info('   Tables found: ' . count($allTableNames));
@@ -177,6 +183,7 @@ class CloneCommand extends BaseDbSyncCommand
                 $totalInserted = 0;
                 $totalUpdated = 0;
                 $totalErrors = 0;
+                $errorMessages = [];
                 $totalTables = count($syncOrder);
 
                 $this->info('Inserting records from remote...');
@@ -213,6 +220,9 @@ class CloneCommand extends BaseDbSyncCommand
                     $totalInserted += $stats['inserted'];
                     $totalUpdated += $stats['updated'];
                     $totalErrors += $stats['errors'];
+                    if (!empty($stats['error_messages'])) {
+                        $errorMessages[$table] = array_merge($errorMessages[$table] ?? [], $stats['error_messages']);
+                    }
                 }
 
                 $this->newLine();
@@ -222,6 +232,24 @@ class CloneCommand extends BaseDbSyncCommand
                 }
                 if ($totalErrors > 0) {
                     $this->warn("   ⚠ Errors: {$totalErrors}");
+
+                    if (!empty($errorMessages)) {
+                        $this->newLine();
+                        $this->warn('Error details:');
+                        foreach ($errorMessages as $errTable => $errors) {
+                            $this->warn("  {$errTable}:");
+                            $shown = array_slice($errors, 0, 3);
+                            foreach ($shown as $err) {
+                                $idPart = $err['id'] !== null ? "[id={$err['id']}] " : '';
+                                $this->warn("    - {$idPart}{$err['message']}");
+                            }
+                            $remaining = count($errors) - 3;
+                            if ($remaining > 0) {
+                                $this->warn("    ... and {$remaining} more");
+                            }
+                        }
+                        Log::warning('db-sync:clone errors', $errorMessages);
+                    }
                 }
 
                 // Reset sequences
