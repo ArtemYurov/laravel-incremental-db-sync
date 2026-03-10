@@ -763,7 +763,10 @@ class PullCommand extends BaseDbSyncCommand
         $totalInserted = $totalUpdated = $totalDeleted = $totalErrors = $syncedTables = 0;
         $tableRows = [];
 
-        foreach ($this->syncResults as $table => $stats) {
+        $orderedTables = $this->dependencyGraph->sortByDependencies(array_keys($this->syncResults), 'parents_first');
+
+        foreach ($orderedTables as $table) {
+            $stats = $this->syncResults[$table];
             $hasChanges = $stats['inserted'] > 0 || $stats['updated'] > 0 || ($stats['deleted'] ?? 0) > 0;
 
             if ($hasChanges) {
