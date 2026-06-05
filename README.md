@@ -7,7 +7,7 @@ Supports incremental sync, full refresh (DROP + CREATE), automatic backups, fore
 ## Requirements
 
 - PHP 8.2+
-- Laravel 10, 11, or 12
+- Laravel 10, 11, 12, or 13
 - PostgreSQL
 - `pg_dump` and `psql` CLI tools available on the local machine
 - [artemyurov/laravel-autossh-tunnel](https://github.com/artemyurov/laravel-autossh-tunnel) for SSH tunnel management
