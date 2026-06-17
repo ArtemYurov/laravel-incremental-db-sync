@@ -55,6 +55,26 @@ abstract class BaseDbSyncCommand extends Command
         $this->dataSyncer = new DataSyncer($this->adapter, $this->output);
         $this->schemaManager = new SchemaManager($this->adapter, $this->dependencyGraph);
         $this->backupManager = new BackupManager($this->adapter);
+
+        $this->disableQueryRecording();
+    }
+
+    /**
+     * Disable per-query recorders for the duration of the sync. They capture every
+     * statement (full SQL + bindings) — for bulk inserts of thousands of rows this adds
+     * huge overhead and memory use. Notably Laravel Telescope's query watcher.
+     */
+    protected function disableQueryRecording(): void
+    {
+        DB::connection($this->syncConfig->target)->disableQueryLog();
+        $this->line('ℹ DB query log disabled for this sync');
+
+        if (class_exists(\Laravel\Telescope\Telescope::class)) {
+            \Laravel\Telescope\Telescope::stopRecording();
+            $this->line('ℹ Telescope stop recording for this sync');
+        }
+
+        $this->newLine();
     }
 
     /**
