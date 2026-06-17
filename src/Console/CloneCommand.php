@@ -205,25 +205,32 @@ class CloneCommand extends BaseDbSyncCommand
                 $totalUpdated = 0;
                 $totalErrors = 0;
                 $errorMessages = [];
+                $skippedTables = [];
                 $totalTables = count($syncOrder);
 
-                $this->info('Inserting records from remote (batch size: ' . number_format($this->getBatchSize(), 0, '.', ' ') . ')...');
+                $this->info('Inserting records from remote...');
 
                 foreach ($syncOrder as $idx => $table) {
                     $num = $idx + 1;
-                    $linePrefix = "   [{$num}/{$totalTables}] {$table}";
+                    $basePrefix = "   [{$num}/{$totalTables}] {$table}";
 
                     $remoteMeta = $this->getTableMetadata($table, 'remote');
                     $totalCount = $remoteMeta['count'];
 
                     if ($totalCount == 0) {
-                        $this->line("{$linePrefix} ✓");
+                        $this->line("{$basePrefix} ✓");
                         continue;
                     }
 
-                    // Progress bar
+                    // Effective batch size is per-table (capped by the bind-parameter limit),
+                    // so show it at the end of the table line rather than as a single global value.
+                    $batchSize = $this->dataSyncer->effectiveBatchSize($this->sourceConnection(), $table, $this->getBatchSize());
+                    $batchLabel = "[batch: {$batchSize}]";
+
+                    // Progress bar (with live read/write timing in %message%)
                     $recordsBar = $this->output->createProgressBar($totalCount);
-                    $recordsBar->setFormat("{$linePrefix} [%bar%] %percent:3s%%  %current%/%max%");
+                    $recordsBar->setFormat("{$basePrefix} [%bar%] %percent:3s%%  %current%/%max% {$batchLabel} %message%");
+                    $recordsBar->setMessage('');
                     $recordsBar->display();
 
                     // Bulk INSERT into the freshly recreated (empty) table — no upsert.
@@ -232,13 +239,24 @@ class CloneCommand extends BaseDbSyncCommand
                         $this->sourceConnection(),
                         $this->targetConnection(),
                         $table,
-                        $this->getBatchSize(),
+                        $batchSize,
                         $this->retryCallback(),
                         $recordsBar,
                     );
 
                     $recordsBar->clear();
-                    $this->line("{$linePrefix} ✓ {$totalCount}");
+
+                    if (!empty($stats['skipped'])) {
+                        $skippedTables[] = $table;
+                        $this->line("{$basePrefix} ⊘ skipped (no primary key)");
+                        continue;
+                    }
+
+                    $line = "{$basePrefix} ✓ {$stats['inserted']}";
+                    if ($stats['errors'] > 0) {
+                        $line .= " (⚠ {$stats['errors']} failed)";
+                    }
+                    $this->line($line);
 
                     $totalInserted += $stats['inserted'];
                     $totalUpdated += $stats['updated'];
@@ -252,6 +270,9 @@ class CloneCommand extends BaseDbSyncCommand
                 $this->info("   ✓ Records inserted: " . number_format($totalInserted, 0, ',', ' '));
                 if ($totalUpdated > 0) {
                     $this->info("   ✓ Records updated: " . number_format($totalUpdated, 0, ',', ' '));
+                }
+                if (!empty($skippedTables)) {
+                    $this->warn('   ⊘ Skipped (no primary key, cannot sync reliably): ' . implode(', ', $skippedTables));
                 }
                 if ($totalErrors > 0) {
                     $this->warn("   ⚠ Errors: {$totalErrors}");

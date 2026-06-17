@@ -197,7 +197,9 @@ Options:
 4. Drops local-only tables (skipped with `--keep-local-tables`)
 5. Dumps schema from remote using `pg_dump`
 6. Drops all local tables and recreates from dump
-7. Copies all data from remote in batches
+7. Copies data from remote with keyset pagination (by primary key) + bulk INSERT; a failed
+   batch falls back to row-by-row inserts. Tables without a primary key are skipped (they
+   cannot be paginated or de-duplicated reliably) and reported at the end.
 8. Resets sequences
 
 ### Foreign Key Handling

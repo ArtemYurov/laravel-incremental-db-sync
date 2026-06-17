@@ -557,7 +557,8 @@ class PullCommand extends BaseDbSyncCommand
             }
 
             $recordsBar = $this->output->createProgressBar($totalCount);
-            $recordsBar->setFormat("{$linePrefix} [%bar%] %percent:3s%%  %current%/%max%");
+            $recordsBar->setFormat("{$linePrefix} [%bar%] %percent:3s%%  %current%/%max% %message%");
+            $recordsBar->setMessage('');
             $recordsBar->display();
 
             $upsertStats = $this->dataSyncer->syncTableFromRemote(

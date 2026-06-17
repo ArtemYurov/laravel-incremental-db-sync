@@ -11,6 +11,12 @@ use Symfony\Component\Console\Output\OutputInterface;
 
 class DataSyncer
 {
+    /**
+     * Safe upper bound for bind parameters in a single multi-row INSERT.
+     * PostgreSQL's hard limit is 65535; we stay below it with a margin.
+     */
+    protected const MAX_BIND_PARAMS = 65000;
+
     /** UNIQUE constraints cache per table */
     protected array $constraintsCache = [];
 
@@ -20,9 +26,28 @@ class DataSyncer
     ) {}
 
     /**
-     * Bulk-insert a regular table's data into an empty target table
-     * (offset pagination + multi-row INSERT). Used by `clone` after DROP+CREATE;
-     * no conflict handling.
+     * Effective batch size for a table: the requested size, capped so that one
+     * multi-row INSERT (columns × rows) stays under PostgreSQL's bind-parameter limit.
+     * Used for BOTH reading and inserting so batches are uniform (no read-then-resplit).
+     */
+    public function effectiveBatchSize(Connection $source, string $table, int $requested): int
+    {
+        $columns = count($source->getSchemaBuilder()->getColumnListing($table));
+
+        if ($columns < 1) {
+            return max(1, $requested);
+        }
+
+        return max(1, min($requested, intdiv(self::MAX_BIND_PARAMS, $columns)));
+    }
+
+    /**
+     * Bulk-insert a regular table's data into an empty target table using keyset
+     * pagination by primary key (ORDER BY pk, WHERE pk > last) + multi-row INSERT.
+     * Used by `clone` after DROP+CREATE; no conflict handling.
+     *
+     * Keyset (not OFFSET) pagination is required: OFFSET without a stable order re-reads
+     * or skips rows on a live table, producing duplicate-key errors or silent gaps.
      *
      * Does NOT handle self-referencing tables — use insertTableFromRemote for that.
      *
@@ -32,24 +57,40 @@ class DataSyncer
         Connection $source,
         Connection $target,
         string $table,
+        string $primaryKey,
         int $batchSize,
         callable $retryCallback,
         ?ProgressBar $progressBar = null,
     ): array {
         $stats = ['inserted' => 0, 'updated' => 0, 'errors' => 0, 'error_messages' => []];
 
-        $offset = 0;
+        $lastId = null;
         while (true) {
-            $records = $retryCallback(fn () => $source->table($table)->limit($batchSize)->offset($offset)->get());
+            // Per-batch timing (last batch only) — shows the real read/write cost per batch.
+            $startRead = microtime(true);
+            $records = $retryCallback(function () use ($source, $table, $primaryKey, $batchSize, $lastId) {
+                $query = $source->table($table)->orderBy($primaryKey)->limit($batchSize);
+                if ($lastId !== null) {
+                    $query->where($primaryKey, '>', $lastId);
+                }
+
+                return $query->get();
+            });
+            $readSeconds = microtime(true) - $startRead;
 
             if ($records->isEmpty()) {
                 break;
             }
 
             $rows = array_map(fn ($r) => (array) $r, $records->toArray());
-            $this->insertBatch($target, $table, $rows, $stats, $progressBar);
 
-            $offset += $batchSize;
+            $startWrite = microtime(true);
+            $this->insertBatch($target, $table, $rows, $stats, $progressBar);
+            $writeSeconds = microtime(true) - $startWrite;
+
+            $lastId = end($rows)[$primaryKey];
+
+            $progressBar?->setMessage(sprintf('[r: %.2fs w: %.2fs]', $readSeconds, $writeSeconds));
         }
 
         return $stats;
@@ -58,15 +99,18 @@ class DataSyncer
     /**
      * Bulk-insert a table's data from remote into a freshly recreated (empty) target
      * table. Used by `clone`: since the table was just DROP+CREATE'd, there are no
-     * conflicts, so a plain multi-row INSERT is correct and far faster than per-row
-     * upsert.
+     * conflicts, so a multi-row INSERT is correct and far faster than per-row upsert.
+     *
+     * Tables WITHOUT a primary key are skipped (stats['skipped'] = true): without a key
+     * we can neither paginate by keyset nor de-duplicate, so a reliable copy cannot be
+     * guaranteed.
      *
      * Foreign keys: cross-table ordering is the caller's responsibility — `clone` syncs
      * tables parents-first via the dependency graph. Self-referencing tables are inserted
      * in roots-first order so an intra-table FK (e.g. parent_id) never references a
      * not-yet-inserted row.
      *
-     * @return array{inserted: int, updated: int, errors: int, error_messages: array}
+     * @return array{inserted: int, updated: int, errors: int, error_messages: array, skipped?: bool}
      */
     public function insertTableFromRemote(
         Connection $source,
@@ -79,18 +123,22 @@ class DataSyncer
         $stats = ['inserted' => 0, 'updated' => 0, 'errors' => 0, 'error_messages' => []];
 
         $primaryKey = $this->adapter->getPrimaryKeyColumn($source, $table);
-        $selfRefColumn = $primaryKey
-            ? $this->adapter->getSelfReferencingColumn($source, $table)
-            : null;
+
+        if (! $primaryKey) {
+            // No primary key — cannot keyset-paginate or de-duplicate reliably. Skip.
+            $stats['skipped'] = true;
+
+            return $stats;
+        }
+
+        $selfRefColumn = $this->adapter->getSelfReferencingColumn($source, $table);
 
         if (! $selfRefColumn) {
-            // Regular table — delegate to the shared bulk-insert path.
-            return $this->insertTableData($source, $target, $table, $batchSize, $retryCallback, $progressBar);
+            // Regular table — keyset pagination by primary key + bulk insert.
+            return $this->insertTableData($source, $target, $table, $primaryKey, $batchSize, $retryCallback, $progressBar);
         }
 
         // Self-referencing: fetch in dependency order (roots first) and insert in chunks.
-        $stats = ['inserted' => 0, 'updated' => 0, 'errors' => 0, 'error_messages' => []];
-
         $allRecords = $retryCallback(fn () => $this->adapter->getSelfReferencingRecords($source, $table, $primaryKey, $selfRefColumn));
 
         foreach (array_chunk($allRecords, $batchSize) as $batch) {
@@ -108,7 +156,15 @@ class DataSyncer
     }
 
     /**
-     * Insert one batch of rows, updating stats and advancing the progress bar.
+     * Insert a batch of rows as a single multi-row INSERT, updating stats and progress.
+     *
+     * The batch is already sized within PostgreSQL's bind-parameter limit by the caller
+     * (see effectiveBatchSize), so no further splitting is needed here.
+     *
+     * A multi-row INSERT is atomic: a single bad row (e.g. an orphaned FK) fails the
+     * whole batch, and the exception would carry its full SQL. So on failure we retry the
+     * batch row by row — only the genuinely bad rows are skipped (with short messages),
+     * the rest are inserted, and the log stays small.
      *
      * @param  array<int, array<string, mixed>>  $rows
      * @param  array{inserted:int,updated:int,errors:int,error_messages:array}  $stats
@@ -122,12 +178,53 @@ class DataSyncer
         try {
             $target->table($table)->insert($rows);
             $stats['inserted'] += count($rows);
+            $progressBar?->advance(count($rows));
         } catch (\Exception $e) {
-            $stats['errors'] += count($rows);
-            $stats['error_messages'][] = ['id' => null, 'message' => $e->getMessage()];
+            // Fallback advances the bar per row, so it visibly crawls one-by-one here.
+            $this->insertRowsIndividually($target, $table, $rows, $stats, $progressBar);
+        }
+    }
+
+    /**
+     * Fallback for a failed bulk batch: insert rows one by one so only the offending
+     * rows are reported as errors (with a short message, not the whole batch SQL).
+     *
+     * @param  array<int, array<string, mixed>>  $rows
+     * @param  array{inserted:int,updated:int,errors:int,error_messages:array}  $stats
+     */
+    protected function insertRowsIndividually(Connection $target, string $table, array $rows, array &$stats, ?ProgressBar $progressBar = null): void
+    {
+        foreach ($rows as $row) {
+            try {
+                $target->table($table)->insert($row);
+                $stats['inserted']++;
+            } catch (\Exception $e) {
+                $stats['errors']++;
+                $stats['error_messages'][] = [
+                    'id' => $row['id'] ?? null,
+                    'message' => $this->shortError($e),
+                ];
+            }
+
+            $progressBar?->advance();
+        }
+    }
+
+    /**
+     * Shorten a DB exception message: keep the SQLSTATE/ERROR part, drop the appended
+     * SQL/bindings dump so logs and console output stay readable.
+     */
+    protected function shortError(\Throwable $e): string
+    {
+        $message = $e->getMessage();
+
+        // Laravel's QueryException appends " (Connection: ..., SQL: <full query>)".
+        $cut = strpos($message, ' (Connection:');
+        if ($cut !== false) {
+            $message = substr($message, 0, $cut);
         }
 
-        $progressBar?->advance(count($rows));
+        return trim(preg_replace('/\s+/', ' ', $message));
     }
 
     /**
@@ -245,21 +342,36 @@ class DataSyncer
             );
         }
 
-        // Regular table — simple upsert
-        $offset = 0;
+        // Regular table — keyset pagination (stable on live tables) + bulk upsert.
+        $lastId = null;
         while (true) {
-            $records = $retryCallback(fn () => $source->table($table)->limit($batchSize)->offset($offset)->get());
+            $startRead = microtime(true);
+            $records = $retryCallback(function () use ($source, $table, $primaryKey, $batchSize, $lastId) {
+                $query = $source->table($table)->orderBy($primaryKey)->limit($batchSize);
+                if ($lastId !== null) {
+                    $query->where($primaryKey, '>', $lastId);
+                }
+
+                return $query->get();
+            });
+            $readSeconds = microtime(true) - $startRead;
 
             if ($records->isEmpty()) {
                 break;
             }
 
+            $startWrite = microtime(true);
             $result = $this->upsertRecords($target, $table, $records->toArray(), $primaryKey, $progressBar);
+            $writeSeconds = microtime(true) - $startWrite;
+
             $stats['inserted'] += $result['inserted'];
             $stats['updated'] += $result['updated'];
             $stats['errors'] += $result['errors'];
             $stats['error_messages'] = array_merge($stats['error_messages'], $result['error_messages']);
-            $offset += $batchSize;
+
+            $lastId = $records->last()->{$primaryKey};
+
+            $progressBar?->setMessage(sprintf('[r: %.2fs w: %.2fs]', $readSeconds, $writeSeconds));
         }
 
         return $stats;
@@ -344,14 +456,41 @@ class DataSyncer
         }
 
         $columns = array_keys((array) $records[0]);
+        $updateColumns = array_values(array_filter($columns, fn ($c) => $c !== $primaryKey));
 
         // Delete local records conflicting by UNIQUE constraints
         $this->deleteConflictingRecords($target, $table, $records, $primaryKey);
 
-        foreach ($records as $record) {
-            $record = (array) $record;
+        // Bulk upsert in chunks within the bind-parameter limit; fall back to per-row on error.
+        $rowsPerChunk = max(1, intdiv(self::MAX_BIND_PARAMS, count($columns)));
 
-            $result = $this->adapter->upsertRecord($target, $table, $record, $primaryKey, $columns);
+        foreach (array_chunk($records, $rowsPerChunk) as $chunk) {
+            $rows = array_map(fn ($r) => (array) $r, $chunk);
+
+            try {
+                $target->table($table)->upsert($rows, [$primaryKey], $updateColumns);
+                $stats['updated'] += count($rows);
+                $progressBar?->advance(count($rows));
+            } catch (\Exception $e) {
+                $this->upsertRowsIndividually($target, $table, $rows, $primaryKey, $columns, $stats, $progressBar);
+            }
+        }
+
+        return $stats;
+    }
+
+    /**
+     * Fallback for a failed bulk upsert: upsert rows one by one so only the offending
+     * rows are reported as errors and the rest are applied.
+     *
+     * @param  array<int, array<string, mixed>>  $rows
+     * @param  string[]  $columns
+     * @param  array{inserted:int,updated:int,errors:int,error_messages:array}  $stats
+     */
+    protected function upsertRowsIndividually(Connection $target, string $table, array $rows, string $primaryKey, array $columns, array &$stats, ?ProgressBar $progressBar = null): void
+    {
+        foreach ($rows as $record) {
+            $result = $this->adapter->upsertRecord($target, $table, (array) $record, $primaryKey, $columns);
             $stats['inserted'] += $result['inserted'];
             $stats['updated'] += $result['updated'];
             $stats['errors'] += $result['errors'];
@@ -359,8 +498,6 @@ class DataSyncer
 
             $progressBar?->advance();
         }
-
-        return $stats;
     }
 
     /**
