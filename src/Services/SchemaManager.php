@@ -140,4 +140,65 @@ class SchemaManager
 
         return $result;
     }
+
+    /**
+     * Build the index/constraint reconciliation plan: what to drop and what to create
+     * in target to bring its structure in line with source. Read-only, changes nothing.
+     *
+     * Name-based comparison (see StructureDiff::indexDiff) catches an index rename as a
+     * drop(old)+create(new) pair.
+     *
+     * @param  string[]  $excludedTables  tables excluded from the comparison
+     * @return array{drop: array<int, array{table:string,name:string,type:string,def:string}>, create: array<int, array{table:string,name:string,type:string,def:string}>}
+     */
+    public function planIndexReconcile(
+        Connection $source,
+        Connection $target,
+        array $excludedTables = [],
+    ): array {
+        return StructureDiff::indexDiff(
+            $this->adapter->getIndexMap($source),
+            $this->adapter->getIndexMap($target),
+            $excludedTables,
+        );
+    }
+
+    /**
+     * Apply the index/constraint reconciliation plan to target.
+     *
+     * Constraint-aware: PK/UNIQUE/EXCLUSION are dropped/created via ALTER TABLE, plain
+     * indexes via DROP/CREATE INDEX. Strict order: ALL DROPs first, then all CREATEs —
+     * to free occupied names before recreating.
+     *
+     * @param  array{drop: array<int, array{table:string,name:string,type:string,def:string}>, create: array<int, array{table:string,name:string,type:string,def:string}>}  $plan
+     * @return array{dropped: array<int, array{table:string,name:string,type:string}>, created: array<int, array{table:string,name:string,type:string}>, errors: string[]}
+     */
+    public function applyIndexReconcile(Connection $target, array $plan): array
+    {
+        $report = ['dropped' => [], 'created' => [], 'errors' => []];
+
+        // 1) All drops first — free occupied names.
+        foreach ($plan['drop'] as $obj) {
+            $sql = $this->adapter->dropIndexOrConstraintSql($obj['table'], $obj['name'], $obj['type']);
+            try {
+                $target->unprepared($sql);
+                $report['dropped'][] = ['table' => $obj['table'], 'name' => $obj['name'], 'type' => $obj['type']];
+            } catch (\Exception $e) {
+                $report['errors'][] = "DROP {$obj['name']} ({$obj['table']}): {$e->getMessage()}";
+            }
+        }
+
+        // 2) Then all creates.
+        foreach ($plan['create'] as $obj) {
+            $sql = $this->adapter->createIndexOrConstraintSql($obj['table'], $obj['name'], $obj['type'], $obj['def']);
+            try {
+                $target->unprepared($sql);
+                $report['created'][] = ['table' => $obj['table'], 'name' => $obj['name'], 'type' => $obj['type']];
+            } catch (\Exception $e) {
+                $report['errors'][] = "CREATE {$obj['name']} ({$obj['table']}): {$e->getMessage()}";
+            }
+        }
+
+        return $report;
+    }
 }

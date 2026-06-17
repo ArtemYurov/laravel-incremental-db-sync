@@ -6,6 +6,7 @@ namespace ArtemYurov\DbSync\Adapters;
 
 use ArtemYurov\DbSync\Contracts\DatabaseAdapterInterface;
 use ArtemYurov\DbSync\Exceptions\AdapterException;
+use ArtemYurov\DbSync\Services\StructureDiff;
 use Illuminate\Database\Connection;
 use Symfony\Component\Process\Exception\ProcessFailedException;
 use Symfony\Component\Process\Process;
@@ -364,6 +365,73 @@ class PgsqlAdapter implements DatabaseAdapterInterface
         $connection->statement('CREATE SCHEMA public');
         $connection->statement("GRANT ALL ON SCHEMA public TO {$username}");
         $connection->statement('GRANT ALL ON SCHEMA public TO public');
+    }
+
+    public function getIndexMap(Connection $connection): array
+    {
+        // Source of truth is pg_index + pg_constraint: pg_indexes alone is not enough,
+        // because we need contype (p/u/x) to tell a constraint-backed index from a plain
+        // one — that determines which DDL drops/creates it.
+        $query = "
+            SELECT
+                t.relname AS table_name,
+                c.relname AS name,
+                CASE WHEN con.contype IS NOT NULL THEN con.contype ELSE 'index' END AS type,
+                CASE
+                    WHEN con.contype IS NOT NULL THEN pg_get_constraintdef(con.oid)
+                    ELSE pg_get_indexdef(c.oid)
+                END AS def
+            FROM pg_index i
+            JOIN pg_class c ON c.oid = i.indexrelid
+            JOIN pg_class t ON t.oid = i.indrelid
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            LEFT JOIN pg_constraint con ON con.conindid = c.oid AND con.contype IN ('p', 'u', 'x')
+            WHERE n.nspname = 'public'
+            ORDER BY t.relname, c.relname
+        ";
+
+        $rows = $connection->select($query);
+
+        $map = [];
+        foreach ($rows as $row) {
+            $map[$row->table_name][] = [
+                'name' => $row->name,
+                'type' => $row->type,
+                'def' => $row->def,
+            ];
+        }
+
+        return $map;
+    }
+
+    public function dropIndexOrConstraintSql(string $table, string $name, string $type): string
+    {
+        // CRITICAL: DROP INDEX on a constraint-backed index (PK/UNIQUE/EXCLUSION) is
+        // not allowed ("constraint requires it") — it must be dropped via ALTER TABLE.
+        if ($type === 'index') {
+            return "DROP INDEX IF EXISTS \"{$name}\"";
+        }
+
+        return "ALTER TABLE \"{$table}\" DROP CONSTRAINT IF EXISTS \"{$name}\"";
+    }
+
+    public function createIndexOrConstraintSql(string $table, string $name, string $type, string $def): string
+    {
+        // For a plain index, def is already a complete CREATE INDEX (pg_get_indexdef).
+        if ($type === 'index') {
+            return $def;
+        }
+
+        // For a constraint, def is the body (e.g. "PRIMARY KEY (id)") from pg_get_constraintdef.
+        return "ALTER TABLE \"{$table}\" ADD CONSTRAINT \"{$name}\" {$def}";
+    }
+
+    public function getLocalOnlyTables(Connection $source, Connection $target): array
+    {
+        return StructureDiff::localOnlyTables(
+            $this->getTablesList($target),
+            $this->getTablesList($source),
+        );
     }
 
     public function upsertRecord(

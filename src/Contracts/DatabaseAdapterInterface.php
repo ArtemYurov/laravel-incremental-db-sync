@@ -105,6 +105,33 @@ interface DatabaseAdapterInterface
     public function dropSchema(Connection $connection): void;
 
     /**
+     * Map of indexes and constraints for every table in the schema.
+     *
+     * @return array<string, array<int, array{name:string,type:string,def:string}>>
+     *   table => [ {name, type: 'index'|'p'|'u'|'x', def}, ... ]
+     */
+    public function getIndexMap(Connection $connection): array;
+
+    /**
+     * Build SQL to drop an index/constraint (constraint-aware).
+     * For p/u/x — ALTER TABLE DROP CONSTRAINT; for a plain index — DROP INDEX.
+     */
+    public function dropIndexOrConstraintSql(string $table, string $name, string $type): string;
+
+    /**
+     * Build SQL to create an index/constraint (constraint-aware).
+     * For p/u/x — ALTER TABLE ADD CONSTRAINT; for a plain index — the original CREATE INDEX.
+     */
+    public function createIndexOrConstraintSql(string $table, string $name, string $type, string $def): string;
+
+    /**
+     * Tables present in target (local) but missing in source (remote).
+     *
+     * @return string[]
+     */
+    public function getLocalOnlyTables(Connection $source, Connection $target): array;
+
+    /**
      * Upsert a record via ON CONFLICT.
      *
      * @return array{inserted: int, updated: int, errors: int}
