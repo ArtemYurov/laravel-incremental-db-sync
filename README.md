@@ -113,7 +113,7 @@ Options:
 | `--dry-run` | Show plan without executing |
 | `--skip-backup` | Skip automatic backup |
 | `--skip-sequences` | Skip sequence reset |
-| `--batch-size=10000` | Records per batch |
+| `--batch-size=` | Records per batch (overrides config `db-sync.batch_size` / `DB_SYNC_BATCH_SIZE`, default 10000) |
 | `--memory-limit=-1` | Memory limit in MB |
 | `--force` | Skip confirmation prompt |
 
@@ -148,7 +148,7 @@ Options:
 | `--skip-backup` | Skip automatic backup |
 | `--skip-sync-data` | Refresh structure only, no data |
 | `--keep-local-tables` | Do not drop local-only tables (tables not present on remote) |
-| `--batch-size=10000` | Records per batch |
+| `--batch-size=` | Records per batch (overrides config `db-sync.batch_size` / `DB_SYNC_BATCH_SIZE`, default 10000) |
 | `--memory-limit=-1` | Memory limit in MB |
 | `--force` | Skip confirmation prompt (and drop local-only tables without asking) |
 

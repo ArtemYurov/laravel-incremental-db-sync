@@ -129,9 +129,20 @@ abstract class BaseDbSyncCommand extends Command
     /**
      * Get batch size from command option
      */
+    /**
+     * Resolve the batch size: the explicit --batch-size option when it is a positive
+     * number, otherwise the configured default (config db-sync.batch_size / env
+     * DB_SYNC_BATCH_SIZE).
+     */
     protected function getBatchSize(): int
     {
-        return (int) $this->option('batch-size');
+        $batchSize = (int) $this->option('batch-size');
+
+        if ($batchSize <= 0) {
+            $batchSize = (int) ($this->syncConfig?->batchSize ?? config('db-sync.batch_size', 10000));
+        }
+
+        return $batchSize;
     }
 
     /**

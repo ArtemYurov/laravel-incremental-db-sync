@@ -22,7 +22,7 @@ class PullCommand extends BaseDbSyncCommand
                             {--include-excluded : Include excluded tables}
                             {--analyze-only : Only analyze changes}
                             {--dry-run : Show what will be synchronized without executing}
-                            {--batch-size=10000 : Batch size}
+                            {--batch-size= : Batch size (overrides config db-sync.batch_size)}
                             {--skip-backup : Skip backup creation}
                             {--skip-sequences : Skip sequence reset}
                             {--memory-limit=-1 : Memory limit in MB (-1 unlimited)}';

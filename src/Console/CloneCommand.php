@@ -24,7 +24,7 @@ class CloneCommand extends BaseDbSyncCommand
                             {--skip-backup : Skip backup creation}
                             {--skip-sync-data : Structure only, no data}
                             {--keep-local-tables : Do not drop local-only tables (tables that exist locally but not on remote)}
-                            {--batch-size=10000 : Batch size}
+                            {--batch-size= : Batch size (overrides config db-sync.batch_size)}
                             {--memory-limit=-1 : Memory limit in MB (-1 unlimited)}';
 
     protected $description = 'Full database refresh from remote server (DROP + CREATE + SYNC)';
@@ -207,7 +207,7 @@ class CloneCommand extends BaseDbSyncCommand
                 $errorMessages = [];
                 $totalTables = count($syncOrder);
 
-                $this->info('Inserting records from remote...');
+                $this->info('Inserting records from remote (batch size: ' . number_format($this->getBatchSize(), 0, '.', ' ') . ')...');
 
                 foreach ($syncOrder as $idx => $table) {
                     $num = $idx + 1;
