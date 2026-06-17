@@ -23,6 +23,7 @@ class CloneCommand extends BaseDbSyncCommand
                             {--skip-views : Do not synchronize views}
                             {--skip-backup : Skip backup creation}
                             {--skip-sync-data : Structure only, no data}
+                            {--keep-local-tables : Do not drop local-only tables (tables that exist locally but not on remote)}
                             {--batch-size=10000 : Batch size}
                             {--memory-limit=-1 : Memory limit in MB (-1 unlimited)}';
 
@@ -104,6 +105,14 @@ class CloneCommand extends BaseDbSyncCommand
                 $this->newLine();
             }
 
+            // Local-only tables (present locally, missing on remote) are dropped BEFORE
+            // recreating structure (otherwise their indexes/constraints with the same
+            // names collide on ADD CONSTRAINT, SQLSTATE 42P07). Computed up front so they
+            // can be shown in the plan and confirmed with a SINGLE prompt.
+            $localOnlyTables = $this->option('keep-local-tables')
+                ? []
+                : $this->adapter->getLocalOnlyTables($this->sourceConnection(), $this->targetConnection());
+
             // Show plan
             $this->info('Tables to refresh (structure + data):');
             foreach ($syncTableNames as $table) {
@@ -128,6 +137,17 @@ class CloneCommand extends BaseDbSyncCommand
                 $this->newLine();
             }
 
+            if (!empty($localOnlyTables)) {
+                $this->warn('Local-only tables to be DROPPED (not present on remote):');
+                foreach ($localOnlyTables as $table) {
+                    $meta = $this->getTableMetadata($table, 'local');
+                    $count = $meta['count'] ?? 0;
+                    $this->warn("   • {$table} ({$count} rows)");
+                }
+                $this->line('   (use --keep-local-tables to keep them)');
+                $this->newLine();
+            }
+
             // dry-run
             if ($this->option('dry-run')) {
                 $this->info('--dry-run mode: no actual refresh will be performed');
@@ -149,6 +169,10 @@ class CloneCommand extends BaseDbSyncCommand
                 $this->info('   ✓ Backup created');
                 $this->newLine();
             }
+
+            // Drop local-only tables (listed in the plan above, confirmed by the single
+            // prompt). Done BEFORE recreating structure — frees occupied names.
+            $this->dropLocalOnlyTables($localOnlyTables);
 
             // DROP + CREATE all tables (including excluded — structure only)
             $this->info('Refreshing table structure (DROP + CREATE)...');
@@ -266,6 +290,30 @@ class CloneCommand extends BaseDbSyncCommand
         } finally {
             $this->closeTunnel();
         }
+    }
+
+    /**
+     * Drop local-only tables (present in target, missing in source).
+     *
+     * The list is computed and shown in the plan before the single confirmation prompt,
+     * so there is no second question here — just drop. With --keep-local-tables the list
+     * arrives empty. Dropped via DROP TABLE ... CASCADE, so order does not matter.
+     *
+     * @param  string[]  $orphans
+     */
+    protected function dropLocalOnlyTables(array $orphans): void
+    {
+        if (empty($orphans)) {
+            return;
+        }
+
+        $this->info('Dropping local-only tables...');
+        foreach ($orphans as $table) {
+            $this->adapter->dropTable($this->targetConnection(), $table);
+            $this->line("   🗑️  dropped {$table}");
+        }
+        $this->info('   ✓ Local-only tables dropped: ' . count($orphans));
+        $this->newLine();
     }
 
     protected function confirmRefresh(): bool

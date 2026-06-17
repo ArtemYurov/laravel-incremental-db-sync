@@ -77,6 +77,17 @@ class PullCommand extends BaseDbSyncCommand
             $tablesToRefresh = array_merge($refreshInfo['missing_tables'], $refreshInfo['changed_tables']);
             $viewsToRefresh = array_merge($refreshInfo['missing_views'], $refreshInfo['changed_views']);
 
+            // Index/constraint reconciliation plan (reads both DBs, changes nothing).
+            // Computed early so that pending structural work is not skipped by the early
+            // "no data changes" returns.
+            $indexExcluded = $this->option('include-excluded') ? [] : $this->syncConfig->excludedTables;
+            $indexPlan = $this->schemaManager->planIndexReconcile(
+                $this->sourceConnection(),
+                $this->targetConnection(),
+                $indexExcluded,
+            );
+            $hasIndexWork = !empty($indexPlan['drop']) || !empty($indexPlan['create']);
+
             // Sync plan
             $tablesToSync = $this->buildSyncPlan($analysis, $tablesToRefresh);
 
@@ -91,7 +102,7 @@ class PullCommand extends BaseDbSyncCommand
                 $this->newLine();
             }
 
-            if (empty($tablesToSync)) {
+            if (empty($tablesToSync) && !$hasIndexWork) {
                 $this->info('✓ No changes to synchronize!');
                 return self::SUCCESS;
             }
@@ -106,7 +117,7 @@ class PullCommand extends BaseDbSyncCommand
             // Filter tables with actual changes
             $tablesToProcess = $this->filterTablesWithChanges($tablesToSync);
 
-            if (empty($tablesToProcess)) {
+            if (empty($tablesToProcess) && !$hasIndexWork) {
                 $this->info('✓ No changes to synchronize!');
                 return self::SUCCESS;
             }
@@ -114,6 +125,11 @@ class PullCommand extends BaseDbSyncCommand
             // dry-run
             if ($this->option('dry-run')) {
                 $this->displayChangesTable($tablesToProcess);
+                if ($hasIndexWork) {
+                    $this->info('Index/constraint reconcile pending: '
+                        . count($indexPlan['drop']) . ' to drop, '
+                        . count($indexPlan['create']) . ' to create');
+                }
                 $this->info('--dry-run mode: no actual synchronization will be performed');
                 return self::SUCCESS;
             }
@@ -163,6 +179,10 @@ class PullCommand extends BaseDbSyncCommand
                 }
                 $this->newLine();
             }
+
+            // INDEX / CONSTRAINT RECONCILE — bring target indexes/constraints in line with source.
+            // After refreshTablesStructure (diff is empty for recreated tables) and before data sync.
+            $this->reconcileIndexes();
 
             // MAIN SYNCHRONIZATION
             $this->syncTables($tablesToSync, 'main', true, false);
@@ -628,6 +648,77 @@ class PullCommand extends BaseDbSyncCommand
         }
 
         $this->syncTables($cascadeAnalysis, 'cascade', false);
+    }
+
+    /**
+     * Reconcile target indexes/constraints with source (constraint-aware diff) + post-notification.
+     *
+     * Excluded tables are skipped (unless --include-excluded) to avoid churn on service
+     * tables. pull never drops local-only TABLES (that is the contract), but their
+     * INDEXES from the diff are removed — their names exist only in target.
+     */
+    protected function reconcileIndexes(): void
+    {
+        $excluded = $this->option('include-excluded') ? [] : $this->syncConfig->excludedTables;
+
+        // Recompute the plan (refreshTablesStructure may have recreated some tables whose
+        // indexes are already correct), then apply it.
+        $plan = $this->schemaManager->planIndexReconcile(
+            $this->sourceConnection(),
+            $this->targetConnection(),
+            $excluded,
+        );
+        $report = $this->schemaManager->applyIndexReconcile($this->targetConnection(), $plan);
+
+        $dropped = $report['dropped'];
+        $created = $report['created'];
+
+        if (empty($dropped) && empty($created) && empty($report['errors'])) {
+            $this->info('🔧 Indexes/constraints: already in sync');
+            $this->newLine();
+
+            return;
+        }
+
+        $this->info('🔧 Reconciling indexes/constraints...');
+
+        // Post-notification: what was removed / created, grouped by table.
+        if (!empty($dropped)) {
+            $this->warn('   Removed (' . count($dropped) . '):');
+            foreach ($this->groupIndexesByTable($dropped) as $table => $labels) {
+                $this->warn("     • {$table}: " . implode(', ', $labels));
+            }
+        }
+        if (!empty($created)) {
+            $this->info('   Created (' . count($created) . '):');
+            foreach ($this->groupIndexesByTable($created) as $table => $labels) {
+                $this->info("     • {$table}: " . implode(', ', $labels));
+            }
+        }
+        foreach ($report['errors'] as $error) {
+            $this->warn("   ⚠ {$error}");
+        }
+
+        $this->newLine();
+    }
+
+    /**
+     * Group index/constraint objects by table for the post-notification.
+     *
+     * @param  array<int, array{table:string,name:string,type:string}>  $items
+     * @return array<string, string[]>
+     */
+    protected function groupIndexesByTable(array $items): array
+    {
+        $grouped = [];
+        foreach ($items as $item) {
+            $label = $item['type'] === 'index'
+                ? $item['name']
+                : "{$item['name']} ({$item['type']})";
+            $grouped[$item['table']][] = $label;
+        }
+
+        return $grouped;
     }
 
     /**
