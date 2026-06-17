@@ -36,7 +36,7 @@ class ExcludedInScopeTest extends TestCase
         $result = $this->command->callGetExcludedInScope(
             ['users', 'sessions', 'cache', 'orders'],
             ['sessions', 'cache'],
-            ['users', 'orders'], // syncTableNames — только не-excluded
+            ['users', 'orders'], // syncTableNames — only non-excluded
         );
 
         $this->assertEquals(['sessions', 'cache'], $result);
@@ -44,12 +44,12 @@ class ExcludedInScopeTest extends TestCase
 
     public function test_explicitly_synced_excluded_table_not_in_scope(): void
     {
-        // Таблица sessions в excluded, но также в syncTableNames (через --tables)
-        // Не должна дублироваться в "structure only" списке
+        // Table sessions is excluded but also in syncTableNames (via --tables)
+        // It must not be duplicated in the "structure only" list
         $result = $this->command->callGetExcludedInScope(
             ['users', 'sessions', 'cache', 'orders'],
             ['sessions', 'cache'],
-            ['users', 'sessions', 'orders'], // sessions явно запрошена
+            ['users', 'sessions', 'orders'], // sessions explicitly requested
         );
 
         $this->assertEquals(['cache'], $result);
@@ -57,7 +57,7 @@ class ExcludedInScopeTest extends TestCase
 
     public function test_all_excluded_synced_returns_empty(): void
     {
-        // Все excluded-таблицы явно запрошены через --tables
+        // All excluded tables are explicitly requested via --tables
         $result = $this->command->callGetExcludedInScope(
             ['users', 'sessions', 'cache', 'orders'],
             ['sessions', 'cache'],
@@ -83,7 +83,7 @@ class ExcludedInScopeTest extends TestCase
         $result = $this->command->callGetExcludedInScope(
             ['a', 'b', 'c', 'd'],
             ['b', 'c'],
-            ['a', 'c', 'd'], // c — excluded, но в syncTableNames
+            ['a', 'c', 'd'], // c — excluded, but in syncTableNames
         );
 
         $this->assertSame([0], array_keys($result));

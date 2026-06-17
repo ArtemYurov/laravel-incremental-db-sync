@@ -218,8 +218,8 @@ abstract class BaseDbSyncCommand extends Command
     }
 
     /**
-     * Таблицы в скоупе, которые excluded и НЕ запрошены явно через --tables
-     * (для отображения "structure only, no data")
+     * Tables in scope that are excluded and NOT explicitly requested via --tables
+     * (for the "structure only, no data" listing).
      */
     protected function getExcludedInScope(array $allTableNames, array $excludedTables, array $syncTableNames): array
     {

@@ -83,9 +83,22 @@ php artisan db-sync:pull
 Features:
 - Compares record counts and `updated_at` timestamps to detect changes
 - Automatically rebuilds tables with changed structure
+- Reconciles indexes and constraints to match remote (see *Index/constraint reconciliation* below)
 - Resolves foreign key dependencies for correct sync order
 - CASCADE RECHECK: re-syncs child tables after parent deletions
 - Syncs views and resets sequences
+
+> **Index/constraint reconciliation.** `pull`'s structure detection compares columns
+> only, so index/constraint changes (including renames) would otherwise be invisible.
+> Each run performs a dedicated reconciliation pass: it compares indexes and
+> constraints of every table (by name) between remote and local and brings local in
+> line — constraint-aware (PRIMARY KEY / UNIQUE / EXCLUSION via `ALTER TABLE`, plain
+> indexes via `CREATE`/`DROP INDEX`), applying all drops before all creates so renamed
+> objects don't collide. Excluded tables are skipped. Removed objects are reported
+> afterwards. Note: `pull` never drops local-only **tables** (it preserves work in
+> progress), but it **does** drop indexes/constraints that exist locally and not on
+> remote — including a locally-added index from a not-yet-pushed migration. DDL is
+> owned by migrations; this pass only keeps index/constraint metadata in sync.
 
 Options:
 
@@ -112,6 +125,15 @@ Drops all tables and recreates them from the remote server. Use this for a clean
 php artisan db-sync:clone
 ```
 
+> **Local-only tables.** `clone` mirrors the remote schema, so tables that exist
+> locally but **not** on remote (e.g. leftovers from an interrupted run, or a renamed
+> table whose old index name lingers) must be removed first — otherwise their index
+> and constraint names collide with recreated tables (`SQLSTATE[42P07] ... already
+> exists`). Such local-only tables are listed in the plan (with row counts) alongside
+> the tables to refresh, and are dropped as part of the **single** confirmation prompt
+> (no separate question). Pass `--keep-local-tables` to keep them (only safe when their
+> names don't clash with remote objects).
+
 Options:
 
 | Option | Description |
@@ -125,9 +147,10 @@ Options:
 | `--skip-views` | Skip view synchronization |
 | `--skip-backup` | Skip automatic backup |
 | `--skip-sync-data` | Refresh structure only, no data |
+| `--keep-local-tables` | Do not drop local-only tables (tables not present on remote) |
 | `--batch-size=10000` | Records per batch |
 | `--memory-limit=-1` | Memory limit in MB |
-| `--force` | Skip confirmation prompt |
+| `--force` | Skip confirmation prompt (and drop local-only tables without asking) |
 
 ### `db-sync:restore` — Restore from Backup
 
@@ -161,18 +184,21 @@ Options:
 3. Analyzes each table: compares row counts, max IDs, and `updated_at` timestamps
 4. Detects tables with changed structure (columns added/removed/modified)
 5. Rebuilds changed tables (DROP + CREATE + import data)
-6. For unchanged structure: runs DELETE phase (removes records missing from remote), then UPSERT phase (inserts new / updates modified records)
-7. CASCADE RECHECK: if parent table had deletions, re-checks child tables
-8. Syncs views and resets auto-increment sequences
+6. Reconciles indexes/constraints to match remote (constraint-aware; all drops then all creates)
+7. For unchanged structure: runs DELETE phase (removes records missing from remote), then UPSERT phase (inserts new / updates modified records)
+8. CASCADE RECHECK: if parent table had deletions, re-checks child tables
+9. Syncs views and resets auto-increment sequences
 
 ### Full Clone (`db-sync:clone`)
 
 1. Opens SSH tunnel to the remote server
-2. Creates a local backup
-3. Dumps schema from remote using `pg_dump`
-4. Drops all local tables and recreates from dump
-5. Copies all data from remote in batches
-6. Resets sequences
+2. Shows the refresh plan, including local-only tables (not on remote) to be dropped, and asks for a single confirmation
+3. Creates a local backup
+4. Drops local-only tables (skipped with `--keep-local-tables`)
+5. Dumps schema from remote using `pg_dump`
+6. Drops all local tables and recreates from dump
+7. Copies all data from remote in batches
+8. Resets sequences
 
 ### Foreign Key Handling
 
