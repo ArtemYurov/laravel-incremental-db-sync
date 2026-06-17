@@ -226,7 +226,9 @@ class CloneCommand extends BaseDbSyncCommand
                     $recordsBar->setFormat("{$linePrefix} [%bar%] %percent:3s%%  %current%/%max%");
                     $recordsBar->display();
 
-                    $stats = $this->dataSyncer->syncTableFromRemote(
+                    // Bulk INSERT into the freshly recreated (empty) table — no upsert.
+                    // Cross-table FKs are satisfied by the parents-first sync order above.
+                    $stats = $this->dataSyncer->insertTableFromRemote(
                         $this->sourceConnection(),
                         $this->targetConnection(),
                         $table,

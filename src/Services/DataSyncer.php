@@ -20,26 +20,25 @@ class DataSyncer
     ) {}
 
     /**
-     * Insert data into an empty table (used in refresh after DROP+CREATE).
+     * Bulk-insert a regular table's data into an empty target table
+     * (offset pagination + multi-row INSERT). Used by `clone` after DROP+CREATE;
+     * no conflict handling.
      *
-     * @return array{inserted: int, errors: int}
+     * Does NOT handle self-referencing tables — use insertTableFromRemote for that.
+     *
+     * @return array{inserted: int, updated: int, errors: int, error_messages: array}
      */
     public function insertTableData(
         Connection $source,
         Connection $target,
         string $table,
-        int $remoteCount,
         int $batchSize,
         callable $retryCallback,
+        ?ProgressBar $progressBar = null,
     ): array {
-        $stats = ['inserted' => 0, 'errors' => 0, 'error_messages' => []];
-
-        if ($remoteCount == 0) {
-            return $stats;
-        }
+        $stats = ['inserted' => 0, 'updated' => 0, 'errors' => 0, 'error_messages' => []];
 
         $offset = 0;
-
         while (true) {
             $records = $retryCallback(fn () => $source->table($table)->limit($batchSize)->offset($offset)->get());
 
@@ -47,19 +46,88 @@ class DataSyncer
                 break;
             }
 
-            try {
-                $recordsArray = array_map(fn ($record) => (array) $record, $records->toArray());
-                $target->table($table)->insert($recordsArray);
-                $stats['inserted'] += $records->count();
-            } catch (\Exception $e) {
-                $stats['errors'] += $records->count();
-                $stats['error_messages'][] = ['id' => null, 'message' => $e->getMessage()];
-            }
+            $rows = array_map(fn ($r) => (array) $r, $records->toArray());
+            $this->insertBatch($target, $table, $rows, $stats, $progressBar);
 
             $offset += $batchSize;
         }
 
         return $stats;
+    }
+
+    /**
+     * Bulk-insert a table's data from remote into a freshly recreated (empty) target
+     * table. Used by `clone`: since the table was just DROP+CREATE'd, there are no
+     * conflicts, so a plain multi-row INSERT is correct and far faster than per-row
+     * upsert.
+     *
+     * Foreign keys: cross-table ordering is the caller's responsibility — `clone` syncs
+     * tables parents-first via the dependency graph. Self-referencing tables are inserted
+     * in roots-first order so an intra-table FK (e.g. parent_id) never references a
+     * not-yet-inserted row.
+     *
+     * @return array{inserted: int, updated: int, errors: int, error_messages: array}
+     */
+    public function insertTableFromRemote(
+        Connection $source,
+        Connection $target,
+        string $table,
+        int $batchSize,
+        callable $retryCallback,
+        ?ProgressBar $progressBar = null,
+    ): array {
+        $stats = ['inserted' => 0, 'updated' => 0, 'errors' => 0, 'error_messages' => []];
+
+        $primaryKey = $this->adapter->getPrimaryKeyColumn($source, $table);
+        $selfRefColumn = $primaryKey
+            ? $this->adapter->getSelfReferencingColumn($source, $table)
+            : null;
+
+        if (! $selfRefColumn) {
+            // Regular table — delegate to the shared bulk-insert path.
+            return $this->insertTableData($source, $target, $table, $batchSize, $retryCallback, $progressBar);
+        }
+
+        // Self-referencing: fetch in dependency order (roots first) and insert in chunks.
+        $stats = ['inserted' => 0, 'updated' => 0, 'errors' => 0, 'error_messages' => []];
+
+        $allRecords = $retryCallback(fn () => $this->adapter->getSelfReferencingRecords($source, $table, $primaryKey, $selfRefColumn));
+
+        foreach (array_chunk($allRecords, $batchSize) as $batch) {
+            $rows = array_map(function ($record) {
+                $record = (array) $record;
+                unset($record['depth']);
+
+                return $record;
+            }, $batch);
+
+            $this->insertBatch($target, $table, $rows, $stats, $progressBar);
+        }
+
+        return $stats;
+    }
+
+    /**
+     * Insert one batch of rows, updating stats and advancing the progress bar.
+     *
+     * @param  array<int, array<string, mixed>>  $rows
+     * @param  array{inserted:int,updated:int,errors:int,error_messages:array}  $stats
+     */
+    protected function insertBatch(Connection $target, string $table, array $rows, array &$stats, ?ProgressBar $progressBar): void
+    {
+        if (empty($rows)) {
+            return;
+        }
+
+        try {
+            $target->table($table)->insert($rows);
+            $stats['inserted'] += count($rows);
+        } catch (\Exception $e) {
+            $stats['errors'] += count($rows);
+            $stats['error_messages'][] = ['id' => null, 'message' => $e->getMessage()];
+        }
+
+        $progressBar?->advance(count($rows));
     }
 
     /**
