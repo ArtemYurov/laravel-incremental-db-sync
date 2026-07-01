@@ -20,6 +20,9 @@ class DataSyncer
     /** UNIQUE constraints cache per table */
     protected array $constraintsCache = [];
 
+    /** Whole-schema index map cache (lazy, populated once per sync) */
+    protected ?array $indexMapCache = null;
+
     public function __construct(
         protected DatabaseAdapterInterface $adapter,
         protected ?OutputInterface $output = null,
@@ -333,6 +336,31 @@ class DataSyncer
             return $stats;
         }
 
+        // Drop secondary unique indexes for the data phase so a row-by-row upsert can permute
+        // their values between rows without transient 23505; recreate validates the result.
+        return $this->withoutSecondaryUniqueIndexes(
+            $target,
+            $table,
+            fn () => $this->syncTableRowsFromRemote($source, $target, $table, $primaryKey, $batchSize, $retryCallback, $progressBar),
+        );
+    }
+
+    /**
+     * Read-from-source → upsert-into-target loop for one table (wrapped by syncTableFromRemote).
+     *
+     * @return array{inserted: int, updated: int, errors: int, error_messages: array}
+     */
+    protected function syncTableRowsFromRemote(
+        Connection $source,
+        Connection $target,
+        string $table,
+        string $primaryKey,
+        int $batchSize,
+        callable $retryCallback,
+        ?ProgressBar $progressBar = null,
+    ): array {
+        $stats = ['inserted' => 0, 'updated' => 0, 'errors' => 0, 'error_messages' => []];
+
         // Check for self-reference
         $selfRefColumn = $this->adapter->getSelfReferencingColumn($source, $table);
 
@@ -375,6 +403,53 @@ class DataSyncer
         }
 
         return $stats;
+    }
+
+    /**
+     * Run $fn with the table's secondary unique indexes dropped, then recreate them verbatim.
+     *
+     * NOT wrapped in a transaction on purpose: the upsert loop relies on per-statement
+     * autocommit to isolate per-row errors — in PG one failed statement aborts the whole
+     * transaction. recreate runs in finally so the index is always restored.
+     *
+     * @param  callable():array{inserted:int,updated:int,errors:int,error_messages:array}  $fn
+     * @return array{inserted: int, updated: int, errors: int, error_messages: array}
+     */
+    protected function withoutSecondaryUniqueIndexes(Connection $target, string $table, callable $fn): array
+    {
+        $uniqueIndexes = $this->secondaryUniqueIndexes($target, $table);
+
+        foreach ($uniqueIndexes as $ix) {
+            $target->statement($this->adapter->dropIndexOrConstraintSql($table, $ix['name'], 'index'));
+        }
+
+        try {
+            return $fn();
+        } finally {
+            foreach ($uniqueIndexes as $ix) {
+                $target->statement($this->adapter->createIndexOrConstraintSql($table, $ix['name'], 'index', $ix['def']));
+            }
+        }
+    }
+
+    /**
+     * Unique indexes that are not the PK and not backed by a constraint. Type 'index' excludes
+     * PK/constraint objects ('p'/'u'/'x'); the UNIQUE marker in the def keeps only unique ones.
+     *
+     * @return array<int, array{name: string, def: string}>
+     */
+    protected function secondaryUniqueIndexes(Connection $target, string $table): array
+    {
+        if ($this->indexMapCache === null) {
+            $this->indexMapCache = $this->adapter->getIndexMap($target);
+        }
+
+        $unique = array_filter(
+            $this->indexMapCache[$table] ?? [],
+            fn ($obj) => $obj['type'] === 'index' && stripos($obj['def'], 'UNIQUE') !== false,
+        );
+
+        return array_map(fn ($obj) => ['name' => $obj['name'], 'def' => $obj['def']], array_values($unique));
     }
 
     /**
@@ -596,5 +671,6 @@ class DataSyncer
     public function resetConstraintsCache(): void
     {
         $this->constraintsCache = [];
+        $this->indexMapCache = null;
     }
 }
