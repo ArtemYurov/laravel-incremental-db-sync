@@ -72,4 +72,33 @@ class IndexDdlSqlTest extends TestCase
             $sql,
         );
     }
+
+    /**
+     * Regression: DDL routing must key off the constraint contypes (p/u/x), not `=== 'index'`.
+     * A mislabeled plain index (e.g. the truncated 'i' that Postgres produced before the
+     * ::text fix in getIndexMap) must still be treated as a plain index, never wrapped in
+     * ALTER TABLE ADD CONSTRAINT — otherwise it builds `ADD CONSTRAINT ... CREATE UNIQUE INDEX ...`
+     * and dies with SQLSTATE 42601.
+     */
+    public function test_create_treats_non_constraint_type_as_plain_index(): void
+    {
+        $def = 'CREATE UNIQUE INDEX t_slug_idx ON public.t USING btree (brand_id, slug) WHERE (deleted_at IS NULL)';
+
+        // 'i' — the historic truncated value; must return the CREATE INDEX def verbatim.
+        $this->assertSame($def, $this->adapter->createIndexOrConstraintSql('t', 't_slug_idx', 'i', $def));
+        // any other unexpected type is also treated as a plain index, not a constraint.
+        $this->assertSame($def, $this->adapter->createIndexOrConstraintSql('t', 't_slug_idx', '', $def));
+    }
+
+    public function test_drop_treats_non_constraint_type_as_plain_index(): void
+    {
+        $this->assertSame(
+            'DROP INDEX IF EXISTS "t_slug_idx"',
+            $this->adapter->dropIndexOrConstraintSql('t', 't_slug_idx', 'i'),
+        );
+        $this->assertSame(
+            'DROP INDEX IF EXISTS "t_slug_idx"',
+            $this->adapter->dropIndexOrConstraintSql('t', 't_slug_idx', ''),
+        );
+    }
 }

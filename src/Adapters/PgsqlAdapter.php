@@ -376,7 +376,10 @@ class PgsqlAdapter implements DatabaseAdapterInterface
             SELECT
                 t.relname AS table_name,
                 c.relname AS name,
-                CASE WHEN con.contype IS NOT NULL THEN con.contype ELSE 'index' END AS type,
+                -- con.contype is the Postgres 1-byte char type. Without ::text the CASE result
+                -- collapses to that char type and the literal 'index' is truncated to 'i',
+                -- breaking every downstream type === 'index' check for plain indexes.
+                CASE WHEN con.contype IS NOT NULL THEN con.contype::text ELSE 'index' END AS type,
                 CASE
                     WHEN con.contype IS NOT NULL THEN pg_get_constraintdef(con.oid)
                     ELSE pg_get_indexdef(c.oid)
@@ -408,22 +411,38 @@ class PgsqlAdapter implements DatabaseAdapterInterface
     {
         // CRITICAL: DROP INDEX on a constraint-backed index (PK/UNIQUE/EXCLUSION) is
         // not allowed ("constraint requires it") — it must be dropped via ALTER TABLE.
-        if ($type === 'index') {
-            return "DROP INDEX IF EXISTS \"{$name}\"";
+        // Route by the explicit constraint contypes (p/u/x); everything else is a plain
+        // index. This is deliberately not `!== 'index'` so an unexpected type never routes
+        // a plain index into the constraint branch and builds malformed DDL.
+        if (self::isConstraintType($type)) {
+            return "ALTER TABLE \"{$table}\" DROP CONSTRAINT IF EXISTS \"{$name}\"";
         }
 
-        return "ALTER TABLE \"{$table}\" DROP CONSTRAINT IF EXISTS \"{$name}\"";
+        return "DROP INDEX IF EXISTS \"{$name}\"";
     }
 
     public function createIndexOrConstraintSql(string $table, string $name, string $type, string $def): string
     {
-        // For a plain index, def is already a complete CREATE INDEX (pg_get_indexdef).
-        if ($type === 'index') {
-            return $def;
+        // For a constraint, def is the body (e.g. "PRIMARY KEY (id)") from pg_get_constraintdef.
+        if (self::isConstraintType($type)) {
+            return "ALTER TABLE \"{$table}\" ADD CONSTRAINT \"{$name}\" {$def}";
         }
 
-        // For a constraint, def is the body (e.g. "PRIMARY KEY (id)") from pg_get_constraintdef.
-        return "ALTER TABLE \"{$table}\" ADD CONSTRAINT \"{$name}\" {$def}";
+        // For a plain index, def is already a complete CREATE INDEX (pg_get_indexdef) —
+        // return as-is. Any non-constraint type falls here so a mislabeled plain index
+        // never produces `ALTER TABLE ... ADD CONSTRAINT ... CREATE INDEX ...`.
+        return $def;
+    }
+
+    /**
+     * Whether a type from getIndexMap() denotes a constraint-backed object.
+     *
+     * Constraints use pg_constraint.contype values: p (primary key), u (unique),
+     * x (exclusion). Anything else — including 'index' — is a plain index.
+     */
+    private static function isConstraintType(string $type): bool
+    {
+        return in_array($type, ['p', 'u', 'x'], true);
     }
 
     public function getLocalOnlyTables(Connection $source, Connection $target): array
